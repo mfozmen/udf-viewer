@@ -10,8 +10,12 @@ const dom = new JSDOM("<!doctype html><html><body></body></html>");
 globalThis.document = dom.window.document;
 globalThis.window = dom.window;
 
-const { defaultExportName, withPlatformLineEndings, setupExportMenu } =
-  await import("../src/export.js");
+const {
+  defaultExportName,
+  withPlatformLineEndings,
+  setupExportMenu,
+  buildPdfOptions,
+} = await import("../src/export.js");
 
 const WIN_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Edg/120.0";
@@ -54,6 +58,7 @@ function mountExportMenu(
     invoke,
     isTauriAvailable = () => true,
     onBrowserSave,
+    generatePdf,
   } = {},
 ) {
   const exportBtn = document.createElement("button");
@@ -61,12 +66,18 @@ function mountExportMenu(
   exportMenu.hidden = true;
   const exportTxt = document.createElement("button");
   const exportHtml = document.createElement("button");
-  exportMenu.append(exportTxt, exportHtml);
-  document.body.append(exportBtn, exportMenu);
+  const exportPdf = document.createElement("button");
+  exportMenu.append(exportTxt, exportHtml, exportPdf);
+  // Stand-in for the real .page element. setupExportMenu needs a reference
+  // to it so the PDF generator knows what DOM subtree to render.
+  const page = document.createElement("article");
+  page.id = "page";
+  document.body.append(exportBtn, exportMenu, page);
 
   const saveCalls = [];
   const invokeCalls = [];
   const browserSaveCalls = [];
+  const generatePdfCalls = [];
   const alertCalls = [];
   const realAlert = window.alert;
   window.alert = (msg) => alertCalls.push(msg);
@@ -74,10 +85,11 @@ function mountExportMenu(
     window.alert = realAlert;
     exportBtn.remove();
     exportMenu.remove();
+    page.remove();
   });
 
   setupExportMenu({
-    els: { exportBtn, exportMenu, exportTxt, exportHtml },
+    els: { exportBtn, exportMenu, exportTxt, exportHtml, exportPdf, page },
     getDocument: () => doc,
     saveDialog:
       saveDialog ||
@@ -92,13 +104,20 @@ function mountExportMenu(
       }),
     isTauriAvailable,
     onBrowserSave: onBrowserSave || ((payload) => browserSaveCalls.push(payload)),
+    generatePdf:
+      generatePdf ||
+      (async (element, filename) =>
+        generatePdfCalls.push({ tagName: element.tagName, id: element.id, filename })),
   });
   return {
     exportTxt,
     exportHtml,
+    exportPdf,
+    page,
     saveCalls,
     invokeCalls,
     browserSaveCalls,
+    generatePdfCalls,
     alertCalls,
   };
 }
@@ -196,6 +215,66 @@ test("exportAs alerts when the write command rejects", async (t) => {
   await flush();
   assert.equal(alertCalls.length, 1);
   assert.match(alertCalls[0], /^Failed to save: EACCES/);
+});
+
+// --- buildPdfOptions --------------------------------------------------------
+
+test("buildPdfOptions sets pagebreak mode to avoid splitting elements", () => {
+  // html2pdf's default pagebreak ['css', 'legacy'] slices through text
+  // when an element straddles the page boundary — verification codes,
+  // table cells, paragraph runs all end up cut in half. 'avoid-all'
+  // forces would-be-split elements onto the next page intact. Keeping
+  // 'css' and 'legacy' as fallbacks lets per-element page-break-* hints
+  // and explicit .html2pdf__page-break markers still win.
+  const options = buildPdfOptions("foo.pdf");
+  assert.ok(options.pagebreak, "pagebreak config must be present");
+  assert.deepEqual(options.pagebreak.mode, ["avoid-all", "css", "legacy"]);
+});
+
+test("buildPdfOptions threads the filename through", () => {
+  const options = buildPdfOptions("dilekce.pdf");
+  assert.equal(options.filename, "dilekce.pdf");
+});
+
+// --- Export as PDF ----------------------------------------------------------
+
+test("exportPdf hands the page element and a .pdf filename to generatePdf", async (t) => {
+  const parsed = { text: "x", pages: 1, properties: {}, elements: [] };
+  const { exportPdf, page, generatePdfCalls } = mountExportMenu(t, {
+    doc: { parsed, filename: "dilekce.udf" },
+  });
+  exportPdf.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await flush();
+  assert.equal(generatePdfCalls.length, 1);
+  // The PDF is rasterized from the .page subtree, not from raw parsed
+  // text — that's how html2pdf.js produces a visually faithful copy of
+  // what the user is reading.
+  assert.equal(generatePdfCalls[0].id, "page");
+  assert.equal(generatePdfCalls[0].tagName, page.tagName);
+  // Filename derived from the source .udf name with .pdf extension, the
+  // same pattern TXT and HTML use.
+  assert.equal(generatePdfCalls[0].filename, "dilekce.pdf");
+});
+
+test("exportPdf is a no-op when no document is loaded", async (t) => {
+  const { exportPdf, generatePdfCalls } = mountExportMenu(t, { doc: null });
+  exportPdf.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await flush();
+  assert.equal(generatePdfCalls.length, 0);
+});
+
+test("exportPdf alerts when generatePdf rejects", async (t) => {
+  const parsed = { text: "x", pages: 1, properties: {}, elements: [] };
+  const { exportPdf, alertCalls } = mountExportMenu(t, {
+    doc: { parsed, filename: "x.udf" },
+    generatePdf: async () => {
+      throw new Error("html2pdf exploded");
+    },
+  });
+  exportPdf.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await flush();
+  assert.equal(alertCalls.length, 1);
+  assert.match(alertCalls[0], /^PDF export failed: .*html2pdf exploded/);
 });
 
 // --- Browser fallback (no Tauri runtime) -----------------------------------
