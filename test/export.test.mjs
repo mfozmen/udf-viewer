@@ -10,8 +10,12 @@ const dom = new JSDOM("<!doctype html><html><body></body></html>");
 globalThis.document = dom.window.document;
 globalThis.window = dom.window;
 
-const { defaultExportName, withPlatformLineEndings, setupExportMenu } =
-  await import("../src/export.js");
+const {
+  defaultExportName,
+  withPlatformLineEndings,
+  setupExportMenu,
+  buildPdfOptions,
+} = await import("../src/export.js");
 
 const WIN_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Edg/120.0";
@@ -211,6 +215,25 @@ test("exportAs alerts when the write command rejects", async (t) => {
   await flush();
   assert.equal(alertCalls.length, 1);
   assert.match(alertCalls[0], /^Failed to save: EACCES/);
+});
+
+// --- buildPdfOptions --------------------------------------------------------
+
+test("buildPdfOptions sets pagebreak mode to avoid splitting elements", () => {
+  // html2pdf's default pagebreak ['css', 'legacy'] slices through text
+  // when an element straddles the page boundary — verification codes,
+  // table cells, paragraph runs all end up cut in half. 'avoid-all'
+  // forces would-be-split elements onto the next page intact. Keeping
+  // 'css' and 'legacy' as fallbacks lets per-element page-break-* hints
+  // and explicit .html2pdf__page-break markers still win.
+  const options = buildPdfOptions("foo.pdf");
+  assert.ok(options.pagebreak, "pagebreak config must be present");
+  assert.deepEqual(options.pagebreak.mode, ["avoid-all", "css", "legacy"]);
+});
+
+test("buildPdfOptions threads the filename through", () => {
+  const options = buildPdfOptions("dilekce.pdf");
+  assert.equal(options.filename, "dilekce.pdf");
 });
 
 // --- Export as PDF ----------------------------------------------------------
